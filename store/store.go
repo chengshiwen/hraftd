@@ -19,12 +19,14 @@ import (
 	"time"
 
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
+	"github.com/hashicorp/raft-boltdb/v2"
 )
 
 const (
 	retainSnapshotCount = 2
 	raftTimeout         = 10 * time.Second
+	leaderWaitDelay     = 100 * time.Millisecond
+	appliedWaitDelay    = 100 * time.Millisecond
 )
 
 type command struct {
@@ -32,6 +34,15 @@ type command struct {
 	Key   string `json:"key,omitempty"`
 	Value string `json:"value,omitempty"`
 }
+
+type ConsistencyLevel int
+
+// Represents the available consistency levels.
+const (
+	Default ConsistencyLevel = iota
+	Stale
+	Consistent
+)
 
 // Store is a simple key-value store, where all changes are made via Raft consensus.
 type Store struct {
@@ -56,10 +67,46 @@ func New(inmem bool) *Store {
 	}
 }
 
+func (s *Store) LeaderAddr() string {
+	return string(s.raft.Leader())
+}
+
+// LeaderID returns the node ID of the Raft leader. Returns a
+// blank string if there is no leader, or an error.
+func (s *Store) LeaderID() (string, error) {
+	addr := s.LeaderAddr()
+	configFuture := s.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		s.logger.Printf("failed to get raft configuration: %v", err)
+		return "", err
+	}
+
+	for _, srv := range configFuture.Configuration().Servers {
+		if srv.Address == raft.ServerAddress(addr) {
+			return string(srv.ID), nil
+		}
+	}
+	return "", nil
+}
+
+func (s *Store) LeaderAPIAddr() string {
+	id, err := s.LeaderID()
+	if err != nil {
+		return ""
+	}
+	addr, err := s.Get(id, Stale)
+	if err != nil {
+		return ""
+	}
+	return addr
+}
+
 // Open opens the store. If enableSingle is set, and there are no existing peers,
 // then this node becomes the first node, and therefore leader, of the cluster.
 // localID should be the server identifier for this node.
 func (s *Store) Open(enableSingle bool, localID string) error {
+	newNode := !s.raftDBExists()
+
 	// Setup Raft configuration.
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(localID)
@@ -102,7 +149,8 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	}
 	s.raft = ra
 
-	if enableSingle {
+	if enableSingle && newNode {
+		s.logger.Printf("bootstrapping new single cluster")
 		configuration := raft.Configuration{
 			Servers: []raft.Server{
 				{
@@ -117,8 +165,77 @@ func (s *Store) Open(enableSingle bool, localID string) error {
 	return nil
 }
 
+// WaitForLeader blocks until a leader is detected, or the timeout expires.
+func (s *Store) WaitForLeader(timeout time.Duration) (string, error) {
+	tck := time.NewTicker(leaderWaitDelay)
+	defer tck.Stop()
+	tmr := time.NewTimer(timeout)
+	defer tmr.Stop()
+
+	for {
+		select {
+		case <-tck.C:
+			l := s.LeaderAddr()
+			if l != "" {
+				return l, nil
+			}
+		case <-tmr.C:
+			return "", fmt.Errorf("timeout expired")
+		}
+	}
+}
+
+// WaitForAppliedIndex blocks until a given log index has been applied,
+// or the timeout expires.
+func (s *Store) WaitForAppliedIndex(idx uint64, timeout time.Duration) error {
+	tck := time.NewTicker(appliedWaitDelay)
+	defer tck.Stop()
+	tmr := time.NewTimer(timeout)
+	defer tmr.Stop()
+
+	for {
+		select {
+		case <-tck.C:
+			if s.raft.AppliedIndex() >= idx {
+				return nil
+			}
+		case <-tmr.C:
+			return fmt.Errorf("timeout expired")
+		}
+	}
+}
+
+// WaitForApplied waits for all Raft log entries to to be applied to the
+// underlying database.
+func (s *Store) WaitForApplied(timeout time.Duration) error {
+	if timeout == 0 {
+		return nil
+	}
+	s.logger.Printf("waiting for up to %s for application of initial logs", timeout)
+	return s.WaitForAppliedIndex(s.raft.LastIndex(), timeout)
+}
+
+// consistentRead is used to ensure we do not perform a stale
+// read. This is done by verifying leadership before the read.
+func (s *Store) consistentRead() error {
+	future := s.raft.VerifyLeader()
+	return future.Error()
+}
+
 // Get returns the value for the given key.
-func (s *Store) Get(key string) (string, error) {
+func (s *Store) Get(key string, lvl ConsistencyLevel) (string, error) {
+	if lvl != Stale {
+		if s.raft.State() != raft.Leader {
+			return "", raft.ErrNotLeader
+		}
+	}
+
+	if lvl == Consistent {
+		if err := s.consistentRead(); err != nil {
+			return "", err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.m[key], nil
@@ -127,7 +244,7 @@ func (s *Store) Get(key string) (string, error) {
 // Set sets the value for the given key.
 func (s *Store) Set(key, value string) error {
 	if s.raft.State() != raft.Leader {
-		return fmt.Errorf("not leader")
+		return raft.ErrNotLeader
 	}
 
 	c := &command{
@@ -147,7 +264,7 @@ func (s *Store) Set(key, value string) error {
 // Delete deletes the given key.
 func (s *Store) Delete(key string) error {
 	if s.raft.State() != raft.Leader {
-		return fmt.Errorf("not leader")
+		return raft.ErrNotLeader
 	}
 
 	c := &command{
@@ -165,7 +282,7 @@ func (s *Store) Delete(key string) error {
 
 // Join joins a node, identified by nodeID and located at addr, to this store.
 // The node must be ready to respond to Raft communications at that address.
-func (s *Store) Join(nodeID, addr string) error {
+func (s *Store) Join(nodeID, httpAddr string, addr string) error {
 	s.logger.Printf("received join request for remote node %s at %s", nodeID, addr)
 
 	configFuture := s.raft.GetConfiguration()
@@ -196,8 +313,24 @@ func (s *Store) Join(nodeID, addr string) error {
 	if f.Error() != nil {
 		return f.Error()
 	}
+
+	// Set meta info
+	if err := s.Set(nodeID, httpAddr); err != nil {
+		return err
+	}
+
 	s.logger.Printf("node %s at %s joined successfully", nodeID, addr)
 	return nil
+}
+
+// raftDBExists returns true if the raft db in given path exists.
+func (s *Store) raftDBExists() bool {
+	// Check to see if there is a raft db
+	raftFile := filepath.Join(s.RaftDir, "raft.db")
+	if _, err := os.Stat(raftFile); err == nil {
+		return true
+	}
+	return false
 }
 
 type fsm Store

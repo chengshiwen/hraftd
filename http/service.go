@@ -4,17 +4,20 @@ package httpd
 
 import (
 	"encoding/json"
-	"io"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/hashicorp/raft"
+	"github.com/otoolep/hraftd/store"
 )
 
 // Store is the interface Raft-backed key-value stores must implement.
 type Store interface {
 	// Get returns the value for the given key.
-	Get(key string) (string, error)
+	Get(key string, lvl store.ConsistencyLevel) (string, error)
 
 	// Set sets the value for the given key, via distributed consensus.
 	Set(key, value string) error
@@ -23,7 +26,9 @@ type Store interface {
 	Delete(key string) error
 
 	// Join joins the node, identitifed by nodeID and reachable at addr, to the cluster.
-	Join(nodeID string, addr string) error
+	Join(nodeID string, httpAddr string, addr string) error
+
+	LeaderAPIAddr() string
 }
 
 // Service provides HTTP service.
@@ -83,6 +88,31 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// formRedirect returns the value for the "Location" header for a 301 response.
+func (s *Service) formRedirect(r *http.Request, host string) string {
+	protocol := "http"
+	rq := r.URL.RawQuery
+	if rq != "" {
+		rq = fmt.Sprintf("?%s", rq)
+	}
+	return fmt.Sprintf("%s://%s%s%s", protocol, host, r.URL.Path, rq)
+}
+
+func (s *Service) handleStoreError(w http.ResponseWriter, r *http.Request, err error) {
+	if err == raft.ErrNotLeader {
+		leader := s.store.LeaderAPIAddr()
+		if leader == "" {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		redirect := s.formRedirect(r, leader)
+		// http.Redirect(w, r, redirect, http.StatusMovedPermanently)
+		http.Redirect(w, r, redirect, http.StatusTemporaryRedirect)
+		return
+	}
+	w.WriteHeader(http.StatusInternalServerError)
+}
+
 func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 	m := map[string]string{}
 	if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
@@ -90,12 +120,18 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(m) != 2 {
+	if len(m) != 3 {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	remoteAddr, ok := m["addr"]
+	httpAddr, ok := m["httpAddr"]
+	if !ok {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	raftAddr, ok := m["raftAddr"]
 	if !ok {
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -107,9 +143,24 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.store.Join(nodeID, remoteAddr); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
+	if err := s.store.Join(nodeID, httpAddr, raftAddr); err != nil {
+		s.handleStoreError(w, r, err)
 		return
+	}
+}
+
+func level(req *http.Request) (store.ConsistencyLevel, error) {
+	q := req.URL.Query()
+	lvl := strings.TrimSpace(q.Get("level"))
+	switch strings.ToLower(lvl) {
+	case "default":
+		return store.Default, nil
+	case "stale":
+		return store.Stale, nil
+	case "consistent":
+		return store.Consistent, nil
+	default:
+		return store.Default, nil
 	}
 }
 
@@ -127,10 +178,18 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		k := getKey()
 		if k == "" {
 			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
-		v, err := s.store.Get(k)
+
+		lvl, err := level(r)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		v, err := s.store.Get(k, lvl)
+		if err != nil {
+			s.handleStoreError(w, r, err)
 			return
 		}
 
@@ -140,7 +199,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		io.WriteString(w, string(b))
+		w.Write(b)
 
 	case "POST":
 		// Read the value from the POST body.
@@ -151,7 +210,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		for k, v := range m {
 			if err := s.store.Set(k, v); err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
+				s.handleStoreError(w, r, err)
 				return
 			}
 		}
@@ -163,7 +222,7 @@ func (s *Service) handleKeyRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.store.Delete(k); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
+			s.handleStoreError(w, r, err)
 			return
 		}
 		s.store.Delete(k)

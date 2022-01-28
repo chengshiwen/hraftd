@@ -9,15 +9,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"time"
 
+	"github.com/hashicorp/raft"
 	"github.com/otoolep/hraftd/http"
 	"github.com/otoolep/hraftd/store"
 )
 
 // Command line defaults
 const (
-	DefaultHTTPAddr = ":11000"
-	DefaultRaftAddr = ":12000"
+	DefaultHTTPAddr = "localhost:11000"
+	DefaultRaftAddr = "localhost:12000"
 )
 
 // Command line parameters
@@ -69,9 +71,20 @@ func main() {
 
 	// If join was specified, make the join request.
 	if joinAddr != "" {
-		if err := join(joinAddr, raftAddr, nodeID); err != nil {
+		if err := join(joinAddr, httpAddr, raftAddr, nodeID); err != nil {
 			log.Fatalf("failed to join node at %s: %s", joinAddr, err.Error())
 		}
+	}
+
+	// Wait until the store is in full consensus.
+	s.WaitForLeader(120 * time.Second)
+	s.WaitForApplied(10 * time.Second)
+
+	// This may be a standalone server. In that case set its own metadata.
+	if err := s.Set(nodeID, httpAddr); err != nil && err != raft.ErrNotLeader {
+		// Non-leader errors are OK, since metadata will then be set through
+		// consensus as a result of a join. All other errors indicate a problem.
+		log.Fatalf("failed to set meta at %s: %s", nodeID, err.Error())
 	}
 
 	log.Println("hraftd started successfully")
@@ -82,8 +95,8 @@ func main() {
 	log.Println("hraftd exiting")
 }
 
-func join(joinAddr, raftAddr, nodeID string) error {
-	b, err := json.Marshal(map[string]string{"addr": raftAddr, "id": nodeID})
+func join(joinAddr, httpAddr, raftAddr, nodeID string) error {
+	b, err := json.Marshal(map[string]string{"httpAddr": httpAddr, "raftAddr": raftAddr, "id": nodeID})
 	if err != nil {
 		return err
 	}
@@ -92,6 +105,5 @@ func join(joinAddr, raftAddr, nodeID string) error {
 		return err
 	}
 	defer resp.Body.Close()
-
 	return nil
 }

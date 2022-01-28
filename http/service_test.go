@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/otoolep/hraftd/store"
 )
 
 // Test_NewServer tests that a server can perform all basic operations.
@@ -68,7 +70,7 @@ func newTestStore() *testStore {
 	}
 }
 
-func (t *testStore) Get(key string) (string, error) {
+func (t *testStore) Get(key string, lvl store.ConsistencyLevel) (string, error) {
 	return t.m[key], nil
 }
 
@@ -82,8 +84,12 @@ func (t *testStore) Delete(key string) error {
 	return nil
 }
 
-func (t *testStore) Join(nodeID, addr string) error {
+func (t *testStore) Join(nodeID string, httpAddr string, addr string) error {
 	return nil
+}
+
+func (t *testStore) LeaderAPIAddr() string {
+	return ""
 }
 
 func doGet(t *testing.T, url, key string) string {

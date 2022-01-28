@@ -24,15 +24,13 @@ curl -XGET localhost:11000/key/foo
 
 Starting and running a hraftd cluster is easy. Download hraftd like so:
 ```bash
-mkdir hraftd
-cd hraftd/
-export GOPATH=$PWD
-GO111MODULE=on go get github.com/otoolep/hraftd
+git clone https://github.com/chengshiwen/hraftd.git
+make
 ```
 
 Run your first hraftd node like so:
 ```bash
-$GOPATH/bin/hraftd -id node0 ~/node0
+./bin/hraftd -id node0 ./data/node0
 ```
 
 You can now set a key and read its value back:
@@ -42,38 +40,46 @@ curl -XGET localhost:11000/key/user1
 ```
 
 ### Bring up a cluster
-_A walkthrough of setting up a more realistic cluster is [here](https://github.com/otoolep/hraftd/blob/master/CLUSTERING.md)._
+_A walkthrough of setting up a more realistic cluster is [here](https://github.com/chengshiwen/hraftd/blob/master/CLUSTERING.md)._
 
 Let's bring up 2 more nodes, so we have a 3-node cluster. That way we can tolerate the failure of 1 node:
 ```bash
-$GOPATH/bin/hraftd -id node1 -haddr :11001 -raddr :12001 -join :11000 ~/node1
-$GOPATH/bin/hraftd -id node2 -haddr :11002 -raddr :12002 -join :11000 ~/node2
+./bin/hraftd -id node1 -haddr localhost:11001 -raddr localhost:12001 -join localhost:11000 ./data/node1
+./bin/hraftd -id node2 -haddr localhost:11002 -raddr localhost:12002 -join localhost:11001 ./data/node2
 ```
 _This example shows each hraftd node running on the same host, so each node must listen on different ports. This would not be necessary if each node ran on a different host._
 
 This tells each new node to join the existing node. Once joined, each node now knows about the key:
 ```bash
-curl -XGET localhost:11000/key/user1
-curl -XGET localhost:11001/key/user1
-curl -XGET localhost:11002/key/user1
+curl -XGET localhost:11000/key/user1 -L
+curl -XGET localhost:11001/key/user1 -L
+curl -XGET localhost:11002/key/user1 -L
 ```
 
 Furthermore you can add a second key:
 ```bash
-curl -XPOST localhost:11000/key -d '{"user2": "robin"}'
+curl -XPOST localhost:11001/key -d '{"user2": "robin"}' -L
 ```
 
 Confirm that the new key has been set like so:
 ```bash
-curl -XGET localhost:11000/key/user2
-curl -XGET localhost:11001/key/user2
-curl -XGET localhost:11002/key/user2
+curl -XGET localhost:11000/key/user2 -L
+curl -XGET localhost:11001/key/user2 -L
+curl -XGET localhost:11002/key/user2 -L
 ```
 
-#### Stale reads
-Because any node will answer a GET request, and nodes may "fall behind" updates, stale reads are possible. Again, hraftd is a simple program, for the purpose of demonstrating a distributed key-value store. If you are particularly interested in learning more about issue, you should check out [rqlite](https://github.com/rqlite/rqlite). rqlite allows the client to control [read consistency](https://github.com/rqlite/rqlite/blob/master/DOC/CONSISTENCY.md), allowing the client to trade off read-responsiveness and correctness.
+You can now delete a key and its value:
+```bash
+curl -X DELETE localhost:11002/key/user2 -L
+```
 
-Read-consistency support could be ported to hraftd if necessary.
+#### Three consistency level's reads
+You can now read the key's value by different read consistency level:
+```bash
+curl -XGET 'localhost:11000/key/user1?level=stale'
+curl -XGET 'localhost:11001/key/user1?level=default' -L
+curl -XGET 'localhost:11002/key/user1?level=consistent' -L
+```
 
 ### Tolerating failure
 Kill the leader process and watch one of the other nodes be elected leader. The keys are still available for query on the other nodes, and you can set keys on the new leader. Furthermore, when the first node is restarted, it will rejoin the cluster and learn about any updates that occurred while it was down.
