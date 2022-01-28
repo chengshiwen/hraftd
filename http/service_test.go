@@ -92,6 +92,10 @@ func (t *testStore) LeaderAPIAddr() string {
 	return ""
 }
 
+func (t *testStore) ServersAPIAddr() string {
+	return ""
+}
+
 func doGet(t *testing.T, url, key string) string {
 	resp, err := http.Get(fmt.Sprintf("%s/key/%s", url, key))
 	if err != nil {

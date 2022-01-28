@@ -9,14 +9,14 @@ A simple example system like hraftd makes it easy to study the Raft consensus pr
 
 ## Reading and writing keys
 
-The reference implementation is a very simple in-memory key-value store. You can set a key by sending a request to the HTTP bind address (which defaults to `localhost:11000`):
+The reference implementation is a very simple in-memory key-value store. You can set a key by sending a request to the HTTP bind address (which defaults to `127.0.0.1:11000`):
 ```bash
-curl -XPOST localhost:11000/key -d '{"foo": "bar"}'
+curl -XPOST 127.0.0.1:11000/key -d '{"foo": "bar"}'
 ```
 
 You can read the value for a key like so:
 ```bash
-curl -XGET localhost:11000/key/foo
+curl -XGET 127.0.0.1:11000/key/foo
 ```
 
 ## Running hraftd
@@ -35,8 +35,8 @@ Run your first hraftd node like so:
 
 You can now set a key and read its value back:
 ```bash
-curl -XPOST localhost:11000/key -d '{"user1": "batman"}'
-curl -XGET localhost:11000/key/user1
+curl -XPOST 127.0.0.1:11000/key -d '{"user1": "batman"}'
+curl -XGET 127.0.0.1:11000/key/user1
 ```
 
 ### Bring up a cluster
@@ -44,41 +44,48 @@ _A walkthrough of setting up a more realistic cluster is [here](https://github.c
 
 Let's bring up 2 more nodes, so we have a 3-node cluster. That way we can tolerate the failure of 1 node:
 ```bash
-./bin/hraftd -id node1 -haddr localhost:11001 -raddr localhost:12001 -join localhost:11000 ./data/node1
-./bin/hraftd -id node2 -haddr localhost:11002 -raddr localhost:12002 -join localhost:11001 ./data/node2
+./bin/hraftd -id node1 -haddr 127.0.0.1:11001 -raddr 127.0.0.1:12001 -join 127.0.0.1:11000 ./data/node1
+./bin/hraftd -id node2 -haddr 127.0.0.1:11002 -raddr 127.0.0.1:12002 -join 127.0.0.1:11001 ./data/node2
 ```
 _This example shows each hraftd node running on the same host, so each node must listen on different ports. This would not be necessary if each node ran on a different host._
 
 This tells each new node to join the existing node. Once joined, each node now knows about the key:
 ```bash
-curl -XGET localhost:11000/key/user1 -L
-curl -XGET localhost:11001/key/user1 -L
-curl -XGET localhost:11002/key/user1 -L
+curl -XGET 127.0.0.1:11000/key/user1 -L
+curl -XGET 127.0.0.1:11001/key/user1 -L
+curl -XGET 127.0.0.1:11002/key/user1 -L
 ```
 
 Furthermore you can add a second key:
 ```bash
-curl -XPOST localhost:11001/key -d '{"user2": "robin"}' -L
+curl -XPOST 127.0.0.1:11001/key -d '{"user2": "robin"}' -L
 ```
 
 Confirm that the new key has been set like so:
 ```bash
-curl -XGET localhost:11000/key/user2 -L
-curl -XGET localhost:11001/key/user2 -L
-curl -XGET localhost:11002/key/user2 -L
+curl -XGET 127.0.0.1:11000/key/user2 -L
+curl -XGET 127.0.0.1:11001/key/user2 -L
+curl -XGET 127.0.0.1:11002/key/user2 -L
 ```
 
 You can now delete a key and its value:
 ```bash
-curl -X DELETE localhost:11002/key/user2 -L
+curl -X DELETE 127.0.0.1:11002/key/user2 -L
 ```
 
 #### Three consistency level's reads
 You can now read the key's value by different read consistency level:
 ```bash
-curl -XGET 'localhost:11000/key/user1?level=stale'
-curl -XGET 'localhost:11001/key/user1?level=default' -L
-curl -XGET 'localhost:11002/key/user1?level=consistent' -L
+curl -XGET '127.0.0.1:11000/key/user1?level=stale'
+curl -XGET '127.0.0.1:11001/key/user1?level=default' -L
+curl -XGET '127.0.0.1:11002/key/user1?level=consistent' -L
+```
+
+### Leader and servers API
+
+```bash
+curl -XGET 127.0.0.1:11000/leader
+curl -XGET 127.0.0.1:11002/servers
 ```
 
 ### Tolerating failure

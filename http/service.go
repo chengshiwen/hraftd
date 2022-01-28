@@ -29,6 +29,8 @@ type Store interface {
 	Join(nodeID string, httpAddr string, addr string) error
 
 	LeaderAPIAddr() string
+
+	ServersAPIAddr() string
 }
 
 // Service provides HTTP service.
@@ -83,6 +85,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleKeyRequest(w, r)
 	} else if r.URL.Path == "/join" {
 		s.handleJoin(w, r)
+	} else if r.URL.Path == "/leader" {
+		s.handleLeader(w, r)
+	} else if r.URL.Path == "/servers" {
+		s.handleServers(w, r)
 	} else {
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -146,6 +152,24 @@ func (s *Service) handleJoin(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.Join(nodeID, httpAddr, raftAddr); err != nil {
 		s.handleStoreError(w, r, err)
 		return
+	}
+}
+
+func (s *Service) handleLeader(w http.ResponseWriter, r *http.Request) {
+	leader := s.store.LeaderAPIAddr()
+	if leader != "" {
+		w.Write([]byte(leader))
+	} else {
+		w.Write([]byte("empty"))
+	}
+}
+
+func (s *Service) handleServers(w http.ResponseWriter, r *http.Request) {
+	servers := s.store.ServersAPIAddr()
+	if servers != "" {
+		w.Write([]byte(servers))
+	} else {
+		w.Write([]byte("empty"))
 	}
 }
 

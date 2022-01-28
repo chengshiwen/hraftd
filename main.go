@@ -18,8 +18,8 @@ import (
 
 // Command line defaults
 const (
-	DefaultHTTPAddr = "localhost:11000"
-	DefaultRaftAddr = "localhost:12000"
+	DefaultHTTPAddr = "127.0.0.1:11000"
+	DefaultRaftAddr = "127.0.0.1:12000"
 )
 
 // Command line parameters

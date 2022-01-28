@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,20 @@ func New(inmem bool) *Store {
 		inmem:  inmem,
 		logger: log.New(os.Stderr, "[store] ", log.LstdFlags),
 	}
+}
+
+func (s *Store) ServersAPIAddr() string {
+	configFuture := s.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		s.logger.Printf("failed to get raft configuration: %v", err)
+		return ""
+	}
+
+	servers := make([]string, 0, len(configFuture.Configuration().Servers))
+	for _, srv := range configFuture.Configuration().Servers {
+		servers = append(servers, string(srv.Address))
+	}
+	return strings.Join(servers, ",")
 }
 
 func (s *Store) LeaderAddr() string {
